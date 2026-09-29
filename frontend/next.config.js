@@ -2,26 +2,12 @@
 const nextConfig = {
   reactStrictMode: true,
   async rewrites() {
-    const backendUrl = process.env.BACKEND_PROXY_URL || process.env.NEXT_PUBLIC_BACKEND_URL || 'https://bidlens-ai.onrender.com';
-    return [
-      {
-        source: '/audit/:path*',
-        destination: `${backendUrl}/audit/:path*`,
-      },
-      {
-        source: '/document/:path*',
-        destination: `${backendUrl}/document/:path*`,
-      },
-      {
-        source: '/review/:path*',
-        destination: `${backendUrl}/review/:path*`,
-      },
-      {
-        source: '/system/:path*',
-        destination: `${backendUrl}/system/:path*`,
-      },
-    ];
+    // Never send a fork user's uploaded bids or officer key to the upstream deployment.
+    const backendUrl = process.env.BACKEND_PROXY_URL || "http://127.0.0.1:8000";
+    return ["audit", "document", "review", "system"].map((prefix) => ({
+      source: `/${prefix}/:path*`,
+      destination: `${backendUrl}/${prefix}/:path*`,
+    }));
   },
 };
-
 module.exports = nextConfig;

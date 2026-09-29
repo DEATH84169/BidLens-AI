@@ -1,0 +1,1 @@
+"""Authorized-source verification adapters."""

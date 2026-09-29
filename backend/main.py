@@ -1,83 +1,65 @@
-"""
-BidLens AI - FastAPI Backend Entry Point
-Layer 2 of the teacher-validated architecture.
-"""
-from fastapi import FastAPI
+"""BidLens AI pilot API. Configure an officer key before uploading documents."""
+
+import os
+from pathlib import Path
+from dotenv import load_dotenv
+
+load_dotenv(Path(__file__).parent / ".env")
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from routers import document, audit, review
+from security.auth import require_officer
 from security.offline_mode import get_system_health_status
+from orchestrator.govt_verify import CHECKS
 
-tags_metadata = [
-    {
-        "name": "System",
-        "description": "Sovereign edge health metrics, air-gapped readiness, memory consumption, and CERT-In security integrity status.",
-    },
-    {
-        "name": "Document",
-        "description": "Tender RFP and vendor bid proposal document ingestion, cryptographic SHA-256 fingerprinting, and digital extraction.",
-    },
-    {
-        "name": "Audit",
-        "description": "Automated 3-branch evaluation orchestrating deterministic GFR 2017 rules, cross-document contradiction checks, and risk scoring.",
-    },
-    {
-        "name": "Review",
-        "description": "Human-in-the-loop procurement officer review portal, statutory override logs, and certified PDF dossier generation.",
-    },
-]
-
-app = FastAPI(
-    title="BidLens AI — Autonomous GeM Procurement Auditor API",
-    description="""
-## Smart India Hackathon (SIH) 2026 — Problem Statement ID: 26100
-
-BidLens AI is an intelligent procurement compliance auditor designed for the **Government e-Marketplace (GeM)**.
-
-### Key Architectural Pillars:
-* **Deterministic GFR 2017 Rule Engine:** Zero-hallucination compliance audits for Rules 149, 160, 170 and MSME Order 2012.
-* **Cross-Document Contradiction Detector:** Detects contradictory PANs, expired GSTINs, and inflated turnover claims across attachments.
-* **100% Sovereign Edge Ready:** Operates fully air-gapped with zero external cloud retention.
-* **Cryptographic Tamper-Proofing:** Immediate SHA-256 fingerprinting on document receipt.
-""",
-    version="1.0.0",
-    contact={
-        "name": "Team Hexagon (SIH26009)",
-        "url": "https://bidlens-ai.vercel.app",
-    },
-    license_info={
-        "name": "MIT License",
-        "url": "https://opensource.org/licenses/MIT",
-    },
-    openapi_tags=tags_metadata
-)
-
-# Allow frontend (Next.js on port 3000) and any local client to talk to backend
+app = FastAPI(title="BidLens AI — Evidence-based bid review", version="2.0.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=[
+        s.strip()
+        for s in os.getenv(
+            "BIDLENS_CORS_ORIGINS", "http://localhost:3000,http://127.0.0.1:3000"
+        ).split(",")
+        if s.strip()
+    ],
+    allow_credentials=False,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type", "X-BidLens-Key"],
 )
-
-# Register all route groups
-app.include_router(document.router, prefix="/document", tags=["Document"])
-app.include_router(audit.router,    prefix="/audit",    tags=["Audit"])
-app.include_router(review.router,   prefix="/review",   tags=["Review"])
+app.include_router(document.router, prefix="/document", tags=["Documents"])
+app.include_router(audit.router, prefix="/audit", tags=["Audit"])
+app.include_router(review.router, prefix="/review", tags=["Officer review"])
 
 
 @app.get("/")
 def root():
-    return {
-        "service": "BidLens AI Sovereign Backend",
-        "version": "1.0.0",
-        "status": "OPERATIONAL",
-        "mode": "OFFLINE_EDGE_READY",
-        "docs": "http://localhost:8000/docs"
-    }
+    return {"service": "BidLens AI", "version": "2.0.0"}
 
 
-@app.get("/system/health", tags=["System"])
-def system_health():
-    """Returns sovereign system status, offline metrics, and security integrity."""
+@app.get("/system/health")
+def health():
     return get_system_health_status()
+
+
+@app.get("/system/checks", dependencies=[Depends(require_officer)])
+def checks():
+    return {"checks": [{"id": key, "name": value[0]} for key, value in CHECKS.items()]}
+
+
+@app.get("/system/reference/nic2008/{code}", dependencies=[Depends(require_officer)])
+def nic_reference(code: str):
+    import json
+
+    data = json.loads(
+        (Path(__file__).parent / "data" / "nic2008_selected.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    record = next((r for r in data["records"] if r["code"] == code), {})
+    return {
+        **record,
+        "source_url": data["source_url"],
+        "edition": data["edition"],
+        "coverage": data["coverage"],
+        "use": data["use"],
+    }

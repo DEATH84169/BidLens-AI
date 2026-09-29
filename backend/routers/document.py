@@ -1,193 +1,195 @@
-"""
-Document Router - Layer 2 (FastAPI Backend)
-Handles multi-format document upload (PDF, Word, Excel, Scanned Images), storage,
-SHA-256 fingerprinting, Tender RFP parsing, and pre-packaged 1-click sample document loading.
-"""
-from fastapi import APIRouter, UploadFile, File, HTTPException
-from orchestrator.ai_processing import extract_document_data, extract_tender_rfp_data
+"""Bounded uploads, hash snapshots, immutable tender versions."""
+
+import asyncio
+import os
+import uuid
+import zipfile
+from pathlib import Path
+from typing import Annotated
+from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, ConfigDict, Field
+import storage
+from security.auth import require_officer
 from security.sha256_audit import hash_file
-import shutil, os, uuid
+from orchestrator.ai_processing import extract_tender_rfp_data
+from orchestrator.govt_verify import CHECKS
 
-router = APIRouter()
-
-ROUTER_DIR = os.path.dirname(os.path.abspath(__file__))
-BACKEND_DIR = os.path.dirname(ROUTER_DIR)
-PROJECT_ROOT = os.path.dirname(BACKEND_DIR)
-
-UPLOAD_DIR = os.path.join(BACKEND_DIR, "uploaded_docs")
-SAMPLE_DIRS = [
-    os.path.join(PROJECT_ROOT, "data", "sample_bids"),
-    os.path.join(BACKEND_DIR, "data", "sample_bids"),
-    os.path.join(BACKEND_DIR, "..", "data", "sample_bids"),
-]
-
-def get_sample_dir():
-    for d in SAMPLE_DIRS:
-        if os.path.exists(d):
-            return d
-    return SAMPLE_DIRS[0]
-
-SAMPLE_BIDS_DIR = get_sample_dir()
-os.makedirs(UPLOAD_DIR, exist_ok=True)
-
-ALLOWED_EXTENSIONS = {
-    ".pdf", ".docx", ".doc", ".xlsx", ".xls", ".csv",
-    ".jpg", ".jpeg", ".png", ".bmp", ".tiff", ".tif", ".webp"
+router = APIRouter(dependencies=[Depends(require_officer)])
+ALLOWED = {
+    ".pdf",
+    ".docx",
+    ".xlsx",
+    ".csv",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".webp",
 }
+
+
+def upload_dir():
+    path = Path(
+        os.getenv(
+            "BIDLENS_UPLOAD_DIR",
+            str(Path(__file__).resolve().parents[1] / "uploaded_docs"),
+        )
+    )
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+async def save_upload(file, kind):
+    filename = Path((file.filename or "").replace("\\", "/")).name
+    ext = Path(filename).suffix.lower()
+    if ext not in ALLOWED:
+        raise HTTPException(
+            400, "Unsupported file format. Convert legacy DOC/XLS to DOCX/XLSX."
+        )
+    file_id = str(uuid.uuid4())
+    path = upload_dir() / (file_id + ext)
+    size = 0
+    try:
+        with path.open("wb") as stream:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > 20 * 1024 * 1024:
+                    raise HTTPException(413, "Maximum attachment size is 20 MB.")
+                stream.write(chunk)
+        if not size:
+            raise HTTPException(400, "Empty file.")
+        if ext in {".docx", ".xlsx"}:
+            try:
+                with zipfile.ZipFile(path) as archive:
+                    if (
+                        sum(item.file_size for item in archive.infolist())
+                        > 100 * 1024 * 1024
+                    ):
+                        raise HTTPException(
+                            413, "Expanded Office document exceeds the 100 MB limit."
+                        )
+            except zipfile.BadZipFile:
+                raise HTTPException(422, "Invalid Office document container.")
+        record = {
+            "file_id": file_id,
+            "filename": filename,
+            "path": str(path.resolve()),
+            "sha256": hash_file(str(path)),
+            "kind": kind,
+            "size_bytes": size,
+            "uploaded_at": storage.now(),
+        }
+        storage.put("document", file_id, record)
+        return record
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+
+
+def public_doc(record):
+    return {k: v for k, v in record.items() if k != "path"}
 
 
 @router.post("/upload")
 async def upload_document(file: UploadFile = File(...)):
-    """
-    Upload a vendor bid document (PDF, Word .docx, Excel .xlsx, CSV, or Image).
-    Returns file_id, SHA-256 digital fingerprint, and extracted metadata summary.
-    """
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Unsupported format '{ext}'. Allowed formats: PDF, Word (.docx, .doc), Excel (.xlsx, .xls), Images (.png, .jpg), CSV."
-        )
-
-    file_id = str(uuid.uuid4())
-    save_path = os.path.join(UPLOAD_DIR, f"{file_id}_{file.filename}")
-
-    with open(save_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    sha256_hash = hash_file(save_path)
-    extracted = extract_document_data(save_path)
-
-    return {
-        "file_id": file_id,
-        "filename": file.filename,
-        "file_type": extracted["file_type"],
-        "sha256": sha256_hash,
-        "status": "uploaded",
-        "message": f"Document ({extracted['file_type']}) received and parsed successfully.",
-        "extracted_summary": extracted
-    }
+    record = await save_upload(file, "bid")
+    return {**public_doc(record), "status": "uploaded"}
 
 
 @router.post("/tender/upload")
 async def upload_tender_rfp(file: UploadFile = File(...)):
-    """
-    Upload a Tender RFP Document to extract procurement terms, budget, EMD, turnover, and Make in India thresholds.
-    """
-    ext = os.path.splitext(file.filename)[1].lower()
-    if ext not in ALLOWED_EXTENSIONS:
-        raise HTTPException(status_code=400, detail=f"Unsupported format '{ext}'.")
-
-    file_id = str(uuid.uuid4())
-    save_path = os.path.join(UPLOAD_DIR, f"TENDER_{file_id}_{file.filename}")
-
-    with open(save_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    sha256_hash = hash_file(save_path)
-    tender_data = extract_tender_rfp_data(save_path)
-    tender_data["sha256"] = sha256_hash
-    tender_data["tender_file_id"] = file_id
-
+    record = await save_upload(file, "tender")
+    try:
+        data = await asyncio.to_thread(extract_tender_rfp_data, record["path"])
+    except Exception:
+        raise HTTPException(
+            422,
+            "Tender could not be parsed. Convert to a readable document or enter requirements for officer review.",
+        )
     return {
-        "status": "SUCCESS",
-        "message": "Tender RFP Document uploaded and conditions parsed.",
-        "tender_data": tender_data
+        "status": "DRAFT",
+        "tender_data": {
+            **data,
+            "filename": record["filename"],
+            "tender_file_id": record["file_id"],
+            "sha256": record["sha256"],
+        },
     }
 
 
-@router.get("/tender/sample")
-def get_sample_tender_rfp():
-    """Returns parsed conditions from the pre-packaged sample tender RFP."""
-    sample_path = os.path.join(get_sample_dir(), "Tender_RFP_GeM_Computers.pdf")
-    if not os.path.exists(sample_path):
-        raise HTTPException(status_code=404, detail="Sample tender RFP not found.")
-    
-    file_id = "sample_tender_gem_computers"
-    save_path = os.path.join(UPLOAD_DIR, f"TENDER_{file_id}_Tender_RFP_GeM_Computers.pdf")
-    shutil.copyfile(sample_path, save_path)
-    
-    tender_data = extract_tender_rfp_data(save_path)
-    tender_data["sha256"] = hash_file(save_path)
-    tender_data["tender_file_id"] = file_id
-    
-    return {
-        "status": "SUCCESS",
-        "message": "Sample Tender RFP (Computers & Workstations) loaded.",
-        "tender_data": tender_data
+class Requirements(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
+    budget_inr: float | None = Field(default=None, ge=0)
+    min_turnover_cr: float | None = Field(default=None, ge=0)
+    emd_required_inr: float | None = Field(default=None, ge=0)
+    min_local_content_pct: float | None = Field(default=None, ge=0, le=100)
+    min_warranty_years: float | None = Field(default=None, ge=0, le=100)
+
+
+class TenderPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    tender_id: str = Field(min_length=3, max_length=120)
+    title: str = Field(min_length=3, max_length=300)
+    tender_file_id: str | None = None
+    requirements: Requirements
+    required_checks: list[str] = Field(min_length=1, max_length=len(CHECKS))
+    confirmation_note: str = Field(min_length=10, max_length=4000)
+
+
+@router.post("/tender/confirm")
+def confirm_tender(payload: TenderPayload, actor: str = Depends(require_officer)):
+    if (
+        not payload.confirmation_note.strip()
+        or len(payload.confirmation_note.strip()) < 10
+    ):
+        raise HTTPException(
+            422, "Explain the confirmed tender scope and omitted checks."
+        )
+    if set(payload.required_checks) - set(CHECKS):
+        raise HTTPException(422, "Unknown verification check.")
+    record = (
+        storage.get("document", payload.tender_file_id)
+        if payload.tender_file_id
+        else None
+    )
+    if payload.tender_file_id and (not record or record["kind"] != "tender"):
+        raise HTTPException(404, "Tender document not found.")
+    if record and hash_file(record["path"]) != record["sha256"]:
+        raise HTTPException(
+            409, "Tender document changed after upload; upload a fresh version."
+        )
+    value = {
+        **payload.model_dump(),
+        "version_id": str(uuid.uuid4()),
+        "confirmed_at": storage.now(),
+        "confirmed_by": actor,
+        "document_sha256": record["sha256"] if record else None,
     }
-
-
-@router.get("/sample/vendor-bids")
-def get_sample_vendor_bids():
-    """
-    Returns all pre-packaged sample vendor bid proposals ready for 1-click evaluation.
-    """
-    sample_dir = get_sample_dir()
-    if not os.path.exists(sample_dir):
-        raise HTTPException(status_code=404, detail="Sample bids directory not found.")
-
-    sample_files = [
-        "Bid_ApexLabs_MSME.pdf",
-        "Bid_MegaTech_BigBrand.pdf",
-        "Bid_GlobalCorp_Ineligible.pdf",
-        "BoQ_PriceSchedule_MegaTech.xlsx",
-        "Bid_ApexLabs_Proposal.docx",
-        "Scanned_Letter_ApexLabs.png"
-    ]
-
-    loaded_bids = []
-    for fname in sample_files:
-        src_path = os.path.join(sample_dir, fname)
-        if os.path.exists(src_path):
-            file_id = f"sample_{fname.replace('.', '_').lower()}"
-            dest_path = os.path.join(UPLOAD_DIR, f"{file_id}_{fname}")
-            shutil.copyfile(src_path, dest_path)
-            extracted = extract_document_data(dest_path)
-            loaded_bids.append({
-                "file_id": file_id,
-                "filename": fname,
-                "file_type": extracted["file_type"],
-                "sha256": hash_file(dest_path),
-                "status": "uploaded",
-                "extracted_summary": extracted
-            })
-
-    return {
-        "status": "SUCCESS",
-        "count": len(loaded_bids),
-        "vendor_bids": loaded_bids
-    }
-
-
-@router.post("/sample/load/{sample_name}")
-def load_single_sample(sample_name: str):
-    """
-    Loads a specific sample file (e.g. Bid_ApexLabs_MSME.pdf, Bid_GlobalCorp_Rectified_ReEvaluation.pdf).
-    """
-    sample_dir = get_sample_dir()
-    src_path = os.path.join(sample_dir, sample_name)
-    if not os.path.exists(src_path):
-        raise HTTPException(status_code=404, detail=f"Sample file '{sample_name}' not found.")
-
-    file_id = f"sample_{sample_name.replace('.', '_').lower()}"
-    dest_path = os.path.join(UPLOAD_DIR, f"{file_id}_{sample_name}")
-    shutil.copyfile(src_path, dest_path)
-    extracted = extract_document_data(dest_path)
-
-    return {
-        "file_id": file_id,
-        "filename": sample_name,
-        "file_type": extracted["file_type"],
-        "sha256": hash_file(dest_path),
-        "status": "uploaded",
-        "message": f"Sample file '{sample_name}' loaded successfully.",
-        "extracted_summary": extracted
-    }
+    storage.put("tender", value["version_id"], value)
+    storage.append_event(value["version_id"], "TENDER_CONFIRMED", actor, value)
+    return {"tender": value}
 
 
 @router.get("/list")
 def list_documents():
-    """List all uploaded documents."""
-    files = os.listdir(UPLOAD_DIR) if os.path.exists(UPLOAD_DIR) else []
-    return {"documents": files, "count": len(files)}
+    return {"documents": [public_doc(d) for d in storage.listing("document")]}
+
+
+@router.get("/file/{file_id}")
+def download_document(file_id: str):
+    record = storage.get("document", file_id)
+    if not record:
+        raise HTTPException(404, "Document not found.")
+    if (
+        not Path(record["path"]).is_file()
+        or hash_file(record["path"]) != record["sha256"]
+    ):
+        raise HTTPException(409, "Document missing or changed; evidence unavailable.")
+    return FileResponse(
+        record["path"],
+        filename=record["filename"],
+        media_type="application/octet-stream",
+    )

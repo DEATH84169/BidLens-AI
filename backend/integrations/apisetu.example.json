@@ -1,0 +1,15 @@
+{
+  "pan": {
+    "publisher": "REPLACE with approved publisher name",
+    "environment": "sandbox",
+    "url": "REPLACE with documented HTTPS API Setu endpoint",
+    "method": "POST",
+    "headers_from_env": {"REPLACE_WITH_DOCUMENTED_AUTH_HEADER": "APISETU_PAN_KEY"},
+    "identifier_parameter": "REPLACE_WITH_DOCUMENTED_PAN_PARAMETER",
+    "fixed_parameters": {},
+    "response_identifier_pointer": "/REPLACE_WITH_SUBJECT_FIELD",
+    "response_status_pointer": "/REPLACE_WITH_STATUS_FIELD",
+    "verified_values": ["REPLACE_WITH_VERIFIED_STATUS"],
+    "failed_values": ["REPLACE_WITH_EXPLICIT_FAILED_STATUS"]
+  }
+}

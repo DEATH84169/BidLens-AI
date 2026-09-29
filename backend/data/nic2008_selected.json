@@ -1,0 +1,56 @@
+{
+  "name": "Selected NIC 2008 divisions",
+  "publisher": "Ministry of Statistics and Programme Implementation",
+  "edition": "NIC 2008",
+  "source_url": "https://www.mospi.gov.in/sites/default/files/6ec_dirEst/ec6_nic_2008_code.html",
+  "retrieved_on": "2026-09-29",
+  "extraction_method": "Selected division labels transcribed from the official source page; not a raw downloadable dataset.",
+  "coverage": "11 selected divisions, not a full classification or a bidder registry; not the latest NIC edition.",
+  "use": "Reference only for documents explicitly using NIC 2008. Never establishes registration, active status or exemption eligibility.",
+  "records": [
+    {
+      "code": "19",
+      "description": "Manufacture of coke and refined petroleum products"
+    },
+    {
+      "code": "20",
+      "description": "Manufacture of chemicals and chemical products"
+    },
+    {
+      "code": "25",
+      "description": "Manufacture of fabricated metal products, except machinery and equipment"
+    },
+    {
+      "code": "26",
+      "description": "Manufacture of computer, electronic and optical products"
+    },
+    {
+      "code": "27",
+      "description": "Manufacture of electrical equipment"
+    },
+    {
+      "code": "28",
+      "description": "Manufacture of machinery and equipment n.e.c."
+    },
+    {
+      "code": "33",
+      "description": "Repair and installation of machinery and equipment"
+    },
+    {
+      "code": "41",
+      "description": "Construction of buildings"
+    },
+    {
+      "code": "46",
+      "description": "Wholesale trade, except of motor vehicles and motorcycles"
+    },
+    {
+      "code": "62",
+      "description": "Computer programming, consultancy and related activities"
+    },
+    {
+      "code": "71",
+      "description": "Architecture and engineering activities; technical testing and analysis"
+    }
+  ]
+}

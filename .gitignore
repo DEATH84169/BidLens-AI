@@ -235,3 +235,10 @@ backend/audit_decision_trail.json
 Thumbs.db
 
 
+
+# Pilot database and private publisher configuration
+backend/state/
+*.sqlite3*
+apisetu.private.json
+.env.*
+!.env.example

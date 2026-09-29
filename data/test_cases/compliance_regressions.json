@@ -1,0 +1,16 @@
+{
+  "synthetic": true,
+  "purpose": "Regression scenarios, not an official registry or eligibility training dataset",
+  "cases": [
+    {"id": "negated-msme", "text": "Not an MSME", "expected": "No exemption"},
+    {"id": "negated-emd", "text": "EMD not submitted; bank guarantee required", "expected": "No submitted EMD amount"},
+    {"id": "short-warranty", "warranty_years": 1, "required_years": 3, "expected": "FAIL"},
+    {"id": "missing-pan", "expected": "NOT_VERIFIED, requires review"},
+    {"id": "source-timeout", "expected": "NOT_VERIFIED"},
+    {"id": "sandbox-active", "expected": "SIMULATED, no qualification"},
+    {"id": "different-response-subject", "expected": "NOT_VERIFIED"},
+    {"id": "unread-middle-page", "expected": "Explicit incomplete coverage"},
+    {"id": "different-attachment-pans", "expected": "Attribution review, no automatic fraud claim"},
+    {"id": "unknown-tender-threshold", "expected": "PENDING, no fabricated default"}
+  ]
+}

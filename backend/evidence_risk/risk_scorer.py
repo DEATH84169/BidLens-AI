@@ -1,128 +1,69 @@
-"""
-Explainable Rejection-Risk Scorer & Value-for-Money Spotlight - Layer 4
-Calculates evidence-grounded rejection risk, highlights MSME value advantages,
-and generates actionable Bid Repair guidance.
-"""
+"""Transparent check coverage, not a statistical rejection probability."""
 
 
-def compute_risk_and_value_intelligence(extracted_data: dict, clause_results: list, contradictions: list) -> dict:
-    """
-    Computes an explainable rejection-risk profile, MSME value advantages,
-    and corrective bid repair actions.
-    """
-    fail_clauses = [c for c in clause_results if c.get("status") == "FAIL"]
-    exempt_clauses = [c for c in clause_results if c.get("status") == "EXEMPT"]
-    pass_clauses = [c for c in clause_results if c.get("status") == "PASS"]
-    critical_contradictions = [c for c in contradictions if c.get("severity") in ["CRITICAL", "HIGH"]]
-
-    # ── 1. Rejection Risk Calculation ─────────────────────────
-    if len(fail_clauses) >= 2 or len(critical_contradictions) >= 2:
-        risk_tier = "CRITICAL"
-        risk_score = 0.95
-        rejection_likely = True
-    elif len(fail_clauses) == 1 or len(critical_contradictions) == 1:
-        risk_tier = "HIGH"
-        risk_score = 0.70
-        rejection_likely = True
-    elif any(c.get("status") == "PENDING" for c in clause_results):
-        risk_tier = "MEDIUM"
-        risk_score = 0.40
-        rejection_likely = False
-    else:
-        risk_tier = "LOW"
-        risk_score = 0.05
-        rejection_likely = False
-
-    # ── 2. Explainable Rejection Grounds ──────────────────────
-    risk_explanations = []
-    for f in fail_clauses:
-        risk_explanations.append({
-            "category": "Regulatory Non-Compliance",
-            "clause": f.get("clause_name"),
-            "regulation": f.get("regulation_ref"),
-            "reason": f.get("evidence"),
-            "impact": "Grounds for mandatory technical disqualification."
-        })
-
-    for c in critical_contradictions:
-        risk_explanations.append({
-            "category": "Document Discrepancy",
-            "clause": c.get("title"),
-            "regulation": "GeM Fraud Prevention Guidelines",
-            "reason": c.get("description"),
-            "impact": c.get("impact")
-        })
-
-    # ── 3. Value-for-Money Advantage Spotlight ────────────────
-    is_msme = extracted_data.get("is_msme", False)
-    quote = extracted_data.get("total_quote_inr")
-    bonus_perks = extracted_data.get("bonus_perks", [])
-    warranty = extracted_data.get("warranty", "")
-    
-    value_spotlight_active = False
-    spotlight_highlights = []
-    savings_inr = None
-
-    budget_inr = 5000000.0  # ₹50 Lakhs estimated budget
-    if quote and quote < budget_inr:
-        savings_inr = budget_inr - quote
-        spotlight_highlights.append(f"Cost Savings: Quoted INR {quote:,.0f} (Saves INR {savings_inr:,.0f} / {savings_inr/budget_inr*100:.1f}% below tender budget).")
-
-    if "5-year" in warranty.lower() or "5 year" in warranty.lower():
-        spotlight_highlights.append("Extended Service: 5-Year Comprehensive Onsite Warranty (Standard market baseline is 1 Year).")
-
-    for perk in bonus_perks:
-        if perk not in spotlight_highlights:
-            spotlight_highlights.append(f"Hardware Value-Add: {perk}")
-
-    if is_msme:
-        spotlight_highlights.append("Sovereign MSME Support: Complies with Public Procurement Policy Order 2012 MSE quota.")
-
-    if not rejection_likely and (len(spotlight_highlights) >= 2 or (savings_inr and savings_inr > 0)):
-        value_spotlight_active = True
-
-    # ── 4. Bid Repair & Corrective Guidance ───────────────────
-    bid_repair_actions = []
-    for f in fail_clauses:
-        if f.get("remedy"):
-            bid_repair_actions.append({
-                "issue": f.get("clause_name"),
-                "action_required": f.get("remedy")
-            })
-
-    for c in contradictions:
-        if c.get("remedy"):
-            bid_repair_actions.append({
-                "issue": c.get("title"),
-                "action_required": c.get("remedy")
-            })
-
-    # ── 5. Executive Officer Recommendation ───────────────────
-    if rejection_likely:
-        executive_summary = f"REJECT / CLARIFY: High rejection risk detected ({len(fail_clauses)} failed statutory clauses and {len(critical_contradictions)} critical discrepancies). Recommend issuing clarification letter before final disqualification."
-    elif value_spotlight_active:
-        executive_summary = f"RECOMMENDED (VALUE-FOR-MONEY SPOTLIGHT): Fully compliant proposal with INR {savings_inr:,.0f} cost savings and superior warranty/hardware terms compared to standard bids."
-    else:
-        executive_summary = "COMPLIANT: Bid meets all mandatory GFR requirements and technical specifications."
-
+def compute_risk_and_value_intelligence(
+    data, clauses, contradictions, govt=None, tender_requirements=None
+):
+    required = [g for g in (govt or {}).get("gateways", []) if g.get("required")]
+    failures = [c for c in clauses if c["status"] == "FAIL"]
+    registry_failures = [g for g in required if g["status"] == "FAILED"]
+    pending = [c for c in clauses if c["status"] == "PENDING"]
+    unverified = [g for g in required if g["status"] not in ("VERIFIED", "FAILED")]
+    passed = sum(c["status"] in ("PASS", "EXEMPT") for c in clauses) + sum(
+        g["status"] == "VERIFIED" for g in required
+    )
+    total = sum(c["status"] != "NOT_APPLICABLE" for c in clauses) + len(required)
+    unresolved = (
+        len(pending)
+        + len(unverified)
+        + len(contradictions)
+        + len(data.get("unread_pages", []))
+    )
+    status = (
+        "ISSUES_FOUND"
+        if failures or registry_failures
+        else "REQUIRES_REVIEW"
+        if unresolved or not total
+        else "CHECKS_PASSED"
+    )
+    tier = (
+        "HIGH"
+        if failures or registry_failures
+        else "UNKNOWN"
+        if unresolved or not total
+        else "LOW"
+    )
+    budget = (tender_requirements or {}).get("budget_inr")
+    quote = data.get("total_quote_inr")
+    savings = budget - quote if budget is not None and quote is not None else None
+    summary = f"{status}: {passed}/{total} applicable checks passed; {unresolved} unresolved findings. Final qualification remains with the procurement officer."
     return {
+        "assessment_status": status,
+        "compliance_score": round(100 * passed / total, 1) if total else None,
+        "coverage": {"passed": passed, "applicable": total, "unresolved": unresolved},
         "rejection_risk": {
-            "risk_tier": risk_tier,
-            "risk_score": risk_score,
-            "rejection_likely": rejection_likely,
-            "total_flaws_found": len(fail_clauses) + len(critical_contradictions),
-            "reasons": risk_explanations
+            "risk_tier": tier,
+            "risk_score": None,
+            "rejection_likely": None,
+            "total_flaws_found": len(failures) + len(registry_failures),
+            "reasons": [
+                {"clause": c["clause_name"], "reason": c["evidence"]} for c in failures
+            ],
         },
         "value_spotlight": {
-            "is_spotlight_candidate": value_spotlight_active,
-            "vendor_type": "Micro & Small Enterprise (MSME)" if is_msme else "Standard Enterprise",
+            "is_spotlight_candidate": False,
             "quoted_price_inr": quote,
-            "estimated_savings_inr": savings_inr,
-            "value_highlights": spotlight_highlights
+            "estimated_savings_inr": savings,
+            "value_highlights": [],
+            "vendor_type": "Not independently verified",
         },
         "bid_repair": {
-            "repair_needed": len(bid_repair_actions) > 0,
-            "recommended_actions": bid_repair_actions
+            "repair_needed": bool(unresolved or failures or registry_failures),
+            "recommended_actions": [
+                {"issue": c["clause_name"], "action_required": c["remedy"]}
+                for c in clauses
+                if c.get("remedy")
+            ],
         },
-        "executive_summary": executive_summary
+        "executive_summary": summary,
     }
