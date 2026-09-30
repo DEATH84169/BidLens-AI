@@ -1,206 +1,211 @@
-"""Durable audit snapshots; overrides append events and recompute derived findings."""
+"""
+Audit Router - Layer 2 (FastAPI Backend)
+Triggers compliance audits, logs officer clause overrides with mandatory justification,
+and generates downloadable Certified Black & White PDF Dossiers with Page 2 Override Logs.
+"""
+from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+from typing import Optional, Dict, Any
+from orchestrator.orchestrator import run_full_audit
+from utils.pdf_generator import generate_certified_audit_pdf
+import os
+import datetime
 
-import copy
-import hashlib
-import uuid
-from pathlib import Path
-from typing import Literal
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
-from pydantic import BaseModel, ConfigDict, Field
-import storage
-from security.auth import require_officer
-from security.sha256_audit import hash_file
-from orchestrator.orchestrator import run_full_audit, assess
-from utils.pdf_generator import render_audit_pdf
+router = APIRouter()
 
-router = APIRouter(dependencies=[Depends(require_officer)])
+ROUTER_DIR = os.path.dirname(os.path.abspath(__file__))
+BACKEND_DIR = os.path.dirname(ROUTER_DIR)
+PROJECT_ROOT = os.path.dirname(BACKEND_DIR)
+
+UPLOAD_DIR = os.path.join(BACKEND_DIR, "uploaded_docs")
+REPORTS_DIR = os.path.join(BACKEND_DIR, "generated_reports")
+SAMPLE_BIDS_DIR = os.path.join(PROJECT_ROOT, "data", "sample_bids")
+SIG_FILE = os.path.join(UPLOAD_DIR, "officer_signature.png")
+
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(REPORTS_DIR, exist_ok=True)
+
+AUDIT_CACHE: Dict[str, Any] = {}
+AUDIT_OVERRIDES: Dict[str, Dict[str, Any]] = {}  # bid_id -> { clause_id -> { status, justification, original_status, clause_name, timestamp } }
+
+
+class TenderRequirements(BaseModel):
+    min_turnover_cr: float = Field(default=1.5, ge=0)
+    emd_required_inr: float = Field(default=100000, ge=0)
+    min_local_content_pct: float = Field(default=50, ge=0, le=100)
+    min_warranty_years: float = Field(default=3, ge=0)
+    budget_inr: Optional[float] = Field(default=None, ge=0)
 
 
 class RunAuditPayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    file_ids: list[str] = Field(min_length=1, max_length=20)
-    tender_version_id: str
-    mode: Literal["live", "sandbox", "demo"] = "live"
-
-
-@router.post("/run")
-async def trigger_audit(
-    payload: RunAuditPayload, actor: str = Depends(require_officer)
-):
-    tender = storage.get("tender", payload.tender_version_id)
-    if not tender:
-        raise HTTPException(404, "Confirm and save a tender version before evaluation.")
-    if len(set(payload.file_ids)) != len(payload.file_ids):
-        raise HTTPException(422, "Duplicate attachments.")
-    documents = []
-    for file_id in payload.file_ids:
-        doc = storage.get("document", file_id)
-        if not doc or doc["kind"] != "bid":
-            raise HTTPException(404, "Bid attachment not found.")
-        if not Path(doc["path"]).is_file() or hash_file(doc["path"]) != doc["sha256"]:
-            raise HTTPException(
-                409, "Attachment changed after upload; upload a fresh version."
-            )
-        documents.append(doc)
-    if tender.get("tender_file_id"):
-        source = storage.get("document", tender["tender_file_id"])
-        if (
-            not source
-            or not Path(source["path"]).is_file()
-            or hash_file(source["path"]) != tender["document_sha256"]
-        ):
-            raise HTTPException(409, "Tender evidence changed after confirmation.")
-    try:
-        result = await run_full_audit(
-            [d["path"] for d in documents], tender, payload.mode
-        )
-    except (ValueError, RuntimeError, OSError):
-        raise HTTPException(
-            422,
-            "Document parsing failed. Review attachment format, size and readability.",
-        )
-    # Re-check to bind the assessment to the exact uploaded bytes.
-    if any(hash_file(d["path"]) != d["sha256"] for d in documents):
-        raise HTTPException(
-            409, "An attachment changed during evaluation; retry with a fresh upload."
-        )
-    names = {Path(d["path"]).name: d["filename"] for d in documents}
-    extracted = result["branch_a_extracted_data"]
-    for entries in extracted["evidence"].values():
-        for entry in entries:
-            entry["filename"] = names.get(entry["filename"], entry["filename"])
-    for entry in extracted["unread_pages"]:
-        entry["filename"] = names.get(entry["filename"], entry["filename"])
-    extracted.pop("raw_text", None)
-    result["audit_id"] = str(uuid.uuid4())
-    result["created_at"] = storage.now()
-    result["documents"] = [
-        {k: v for k, v in d.items() if k != "path"} for d in documents
-    ]
-    result["snapshot_sha256"] = hashlib.sha256(
-        storage.canonical(result).encode()
-    ).hexdigest()
-    storage.put("audit", result["audit_id"], result)
-    storage.append_event(
-        result["audit_id"],
-        "AUDIT_CREATED",
-        actor,
-        {"snapshot_sha256": result["snapshot_sha256"]},
-    )
-    return {
-        "audit_id": result["audit_id"],
-        "status": "COMPLETED",
-        "results": current_audit(result["audit_id"]),
-    }
-
-
-def current_audit(audit_id):
-    snapshot = storage.get("audit", audit_id)
-    if not snapshot:
-        raise HTTPException(404, "Audit not found.")
-    unhashed = {k: v for k, v in snapshot.items() if k != "snapshot_sha256"}
-    if (
-        hashlib.sha256(storage.canonical(unhashed).encode()).hexdigest()
-        != snapshot["snapshot_sha256"]
-    ):
-        raise HTTPException(409, "Stored audit integrity check failed.")
-    if not storage.verify_chain()["valid"]:
-        raise HTTPException(409, "Audit event integrity check failed.")
-    result = copy.deepcopy(snapshot)
-    history = storage.events(audit_id)
-    created = next((e for e in history if e["type"] == "AUDIT_CREATED"), None)
-    if not created or created["data"]["snapshot_sha256"] != snapshot["snapshot_sha256"]:
-        raise HTTPException(
-            409, "Audit snapshot does not match its recorded creation event."
-        )
-    for event in history:
-        if event["type"] == "CLAUSE_OVERRIDE":
-            for clause in result["clause_level_decisions"]:
-                if clause["clause_id"] == event["data"]["clause_id"]:
-                    clause["status"] = event["data"]["new_status"]
-                    clause["officer_override_note"] = event["data"]["justification"]
-    result.update(
-        assess(
-            result["branch_a_extracted_data"],
-            result["tender"],
-            result["government_verification"],
-            result["clause_level_decisions"],
-        )
-    )
-    decisions = [e for e in history if e["type"] == "OFFICER_DECISION"]
-    result["officer_decision"] = decisions[-1] if decisions else None
-    result["history"] = history
-    result["automated_assessment_status"] = snapshot["assessment_status"]
-    return result
+    file_id: str
+    tender_id: Optional[str] = "GEM/2026/B/892100"
+    tender_requirements: Optional[TenderRequirements] = None
 
 
 class ClauseOverridePayload(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    audit_id: str
+    bid_id: str
     clause_id: str
-    new_status: Literal["PASS", "FAIL", "EXEMPT", "PENDING", "NOT_APPLICABLE"]
-    justification: str = Field(min_length=10, max_length=4000)
+    clause_name: str
+    original_status: str
+    new_status: str  # "PASS", "FAIL", "EXEMPT"
+    justification: str
+    officer_name: Optional[str] = "Procurement Officer"
+
+
+@router.post("/run")
+async def trigger_audit(payload: RunAuditPayload):
+    """
+    Triggers full compliance audit on an uploaded document file_id or sample filename.
+    """
+    file_id = payload.file_id
+    target_file = None
+
+    if os.path.exists(UPLOAD_DIR):
+        for f in os.listdir(UPLOAD_DIR):
+            if f.startswith(file_id) or f == file_id:
+                target_file = os.path.join(UPLOAD_DIR, f)
+                break
+
+    if not target_file and os.path.exists(SAMPLE_BIDS_DIR):
+        for f in os.listdir(SAMPLE_BIDS_DIR):
+            if file_id.lower() in f.lower() or f.lower() == file_id.lower():
+                target_file = os.path.join(SAMPLE_BIDS_DIR, f)
+                break
+
+    if not target_file or not os.path.exists(target_file):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Document '{file_id}' not found in uploaded_docs or sample_bids."
+        )
+
+    audit_id = file_id
+
+    # Clean fresh run: reset previous test overrides for this file unless explicitly retained
+    if audit_id in AUDIT_OVERRIDES and payload.tender_id != "KEEP_OVERRIDES":
+        AUDIT_OVERRIDES.pop(audit_id, None)
+
+    audit_results = await run_full_audit(target_file, payload.tender_requirements.model_dump() if payload.tender_requirements else None)
+    audit_results["tender_id"] = payload.tender_id
+    AUDIT_CACHE[audit_id] = audit_results
+
+    clean_id = audit_id.replace('.pdf','').replace('.docx','').replace('.xlsx','')
+    pdf_report_path = os.path.join(REPORTS_DIR, f"Audit_Report_{clean_id}.pdf")
+    generate_certified_audit_pdf(
+        audit_results,
+        pdf_report_path,
+        officer_overrides=AUDIT_OVERRIDES.get(audit_id, {})
+    )
+
+    return {
+        "audit_id": audit_id,
+        "status": "COMPLETED",
+        "message": "Audit completed across all verification branches.",
+        "pdf_download_url": f"/audit/report/pdf/{audit_id}",
+        "results": audit_results
+    }
+
+
+@router.post("/overrides/clear")
+def clear_all_overrides():
+    """
+    Clears all recorded officer overrides across all vendor bids for a clean slate.
+    """
+    AUDIT_OVERRIDES.clear()
+    return {"status": "SUCCESS", "message": "All test overrides have been completely cleared."}
+
+
+@router.post("/overrides/reset/{bid_id}")
+def reset_vendor_overrides(bid_id: str):
+    """
+    Clears overrides specifically for a single vendor bid.
+    """
+    if bid_id in AUDIT_OVERRIDES:
+        AUDIT_OVERRIDES.pop(bid_id, None)
+    return {"status": "SUCCESS", "bid_id": bid_id, "message": f"Overrides for {bid_id} cleared."}
 
 
 @router.post("/clause-override")
-def record_clause_override(
-    payload: ClauseOverridePayload, actor: str = Depends(require_officer)
-):
-    if len(payload.justification.strip()) < 10:
-        raise HTTPException(422, "A meaningful written justification is required.")
-    result = current_audit(payload.audit_id)
-    if result["officer_decision"]:
+def record_clause_override(payload: ClauseOverridePayload):
+    """
+    Records a supervisory officer clause verdict override with mandatory justification.
+    """
+    if not payload.justification or len(payload.justification.strip()) < 5:
         raise HTTPException(
-            409,
-            "A final/review decision already exists; run a new assessment version before changing clauses.",
+            status_code=400,
+            detail="A mandatory written justification (minimum 5 characters) is required to override any automated verdict."
         )
-    clause = next(
-        (
-            c
-            for c in result["clause_level_decisions"]
-            if c["clause_id"] == payload.clause_id
-        ),
-        None,
-    )
-    if not clause:
-        raise HTTPException(404, "Clause not found.")
-    storage.append_event(
-        payload.audit_id,
-        "CLAUSE_OVERRIDE",
-        actor,
-        {**payload.model_dump(), "original_status": clause["status"]},
-    )
-    return {"results": current_audit(payload.audit_id)}
+
+    bid_id = payload.bid_id
+    if bid_id not in AUDIT_OVERRIDES:
+        AUDIT_OVERRIDES[bid_id] = {}
+
+    timestamp_str = datetime.datetime.now().strftime("%d-%b-%Y %H:%M:%S")
+
+    AUDIT_OVERRIDES[bid_id][payload.clause_id] = {
+        "clause_id": payload.clause_id,
+        "clause_name": payload.clause_name,
+        "original_status": payload.original_status,
+        "status": payload.new_status,
+        "justification": payload.justification.strip(),
+        "officer_name": payload.officer_name,
+        "timestamp": timestamp_str
+    }
+
+    # Update in cached audit if present
+    if bid_id in AUDIT_CACHE:
+        clauses = AUDIT_CACHE[bid_id].get("clause_level_decisions", [])
+        for c in clauses:
+            if c.get("clause_id") == payload.clause_id:
+                c["status"] = payload.new_status
+                c["officer_override_note"] = payload.justification.strip()
+
+    return {
+        "status": "RECORDED",
+        "bid_id": bid_id,
+        "clause_id": payload.clause_id,
+        "new_status": payload.new_status,
+        "message": f"Verdict for '{payload.clause_name}' overridden to {payload.new_status} with recorded justification."
+    }
 
 
 @router.get("/status/{audit_id}")
 def get_audit_status(audit_id: str):
-    return {"audit_id": audit_id, "results": current_audit(audit_id)}
-
-
-@router.get("/list")
-def list_audits():
-    return {
-        "audits": [
-            {
-                "audit_id": a["audit_id"],
-                "created_at": a["created_at"],
-                "vendor_name": a["file_info"]["vendor_name"],
-                "tender_id": a["tender"]["tender_id"],
-                "mode": a["mode"],
-            }
-            for a in storage.listing("audit")
-        ]
-    }
+    """Retrieve cached audit results for a specific audit_id."""
+    if audit_id not in AUDIT_CACHE:
+        raise HTTPException(status_code=404, detail=f"No audit results found for audit_id '{audit_id}'.")
+    return {"audit_id": audit_id, "status": "COMPLETED", "results": AUDIT_CACHE[audit_id]}
 
 
 @router.get("/report/pdf/{audit_id}")
-def download_audit_pdf(audit_id: str):
-    return Response(
-        render_audit_pdf(current_audit(audit_id)),
+def download_audit_pdf(
+    audit_id: str,
+    officer_name: Optional[str] = Query(None, description="Name of evaluating procurement officer"),
+    officer_designation: Optional[str] = Query(None, description="Designation of evaluating procurement officer")
+):
+    """
+    Download the Official Black & White PDF Audit Dossier with Page 2 Override Log.
+    """
+    clean_id = audit_id.replace('.pdf','').replace('.docx','').replace('.xlsx','')
+    pdf_report_path = os.path.join(REPORTS_DIR, f"Audit_Report_{clean_id}.pdf")
+    
+    if audit_id in AUDIT_CACHE:
+        generate_certified_audit_pdf(
+            AUDIT_CACHE[audit_id],
+            pdf_report_path,
+            officer_name=officer_name,
+            officer_designation=officer_designation,
+            officer_overrides=AUDIT_OVERRIDES.get(audit_id, {})
+        )
+    elif not os.path.exists(pdf_report_path):
+        raise HTTPException(status_code=404, detail=f"Audit report for audit_id '{audit_id}' not found. Please run the audit first.")
+
+    vendor_name = AUDIT_CACHE.get(audit_id, {}).get("file_info", {}).get("vendor_name", "Vendor").replace(" ", "_")
+    download_filename = f"Official_GeM_Audit_Report_{vendor_name}_{clean_id[:8]}.pdf"
+
+    return FileResponse(
+        path=pdf_report_path,
         media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="BidLens-{uuid.UUID(audit_id)}.pdf"'
-        },
+        filename=download_filename
     )

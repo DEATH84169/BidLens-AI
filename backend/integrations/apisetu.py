@@ -9,7 +9,10 @@ import json
 import os
 from urllib.parse import urlsplit
 import httpx
-from storage import now
+from datetime import datetime, timezone
+
+def now():
+    return datetime.now(timezone.utc).isoformat()
 
 
 def pointer(value, path):

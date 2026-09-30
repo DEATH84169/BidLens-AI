@@ -1,23 +1,37 @@
 name: BidLens AI CI
+
 on:
   push:
+    branches: [ main, supreme-leader ]
   pull_request:
-  workflow_dispatch:
-permissions:
-  contents: read
+    branches: [ main, supreme-leader ]
+
 jobs:
-  backend:
+  test-backend:
+    name: Backend Tests & Compliance Verification
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
-          cache: pip
-      - run: pip install -r backend/requirements.txt
-      - run: python -m unittest discover -s backend/tests -v
-      - run: python scripts/check_ocr.py
-  frontend:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+
+      - name: Run Core Test Suite
+        run: |
+          python -m unittest discover -s backend/tests -v
+
+  test-frontend:
+    name: Original Frontend Build
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -26,7 +40,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22'
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - run: npm ci

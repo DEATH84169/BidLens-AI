@@ -8,7 +8,7 @@ API Setu is a sensible replacement for hardcoded verification after approved acc
 - No approved subscription, key, publisher endpoint or schema was supplied. No live verification has been performed or certified.
 - The example configuration intentionally contains invalid placeholders. No production endpoint or response schema was invented.
 - Responses must match the requested identifier and an explicitly configured status. Only the named check is verified: PAN does not prove Income Tax filing, and GST registration does not prove return filing.
-- Live, sandbox and local demo modes are separate. Sandbox/demo cannot qualify bidders. Missing access, errors and unknown responses remain `NOT_VERIFIED`.
+- Set BIDLENS_VERIFICATION_MODE to live, sandbox or demo on the backend. Sandbox/demo never establishes source verification or automatic shortlisting; the original officer review UI is preserved. Missing access, errors and unknown responses remain `NOT_VERIFIED`.
 - On 29 September 2026 the official PAN sandbox collection displayed “Selected API Coming Soon in Sandbox.” The sandbox also states that requests do not use live data.
 
 ## Obtain access
@@ -34,7 +34,9 @@ Copy `backend/integrations/apisetu.example.json` outside Git as `apisetu.private
 
 Set `APISETU_CONFIG_PATH` to the absolute private config path, supply the named secrets and restart. Validate the provider's approved cases, identity, status, period, freshness and adverse outcomes. Disable checks whose contracts cannot substantiate the claim. Filing-period/certificate-validity semantics beyond this generic transport must be implemented for each publisher before production use.
 
-Listing EPFO, ESIC, NSIC, BIS, OEM or debarment in the dashboard does not mean its API has been approved or implemented. The extractor currently supplies PAN, GSTIN, Udyam and CIN; other areas intentionally stay unverified pending dedicated evidence workflows. A partial debarment list's no-match must never be mapped to a universal clean result.
+The existing six verification cards are preserved. Configuration keys are `gst`, `pan`, `mca`, `udyam`, `epfo_esic` and `debarment`. Current document extraction supplies PAN, GSTIN and Udyam; dedicated MCA and labour identifiers still need extraction support. Do not map a single EPFO response to combined EPFO/ESIC compliance. Leave that combined card unconfigured unless a reviewed contract covers both. A debarment no-match is not a universal clearance.
+
+The original `/audit/run` request uses `file_id` and `tender_id`. An optional `tender_requirements` object now passes the active RFP thresholds from the existing UI. This is a local prototype: original in-memory assessments and officer controls remain, with no new authentication or SQLite migration.
 
 ## Evidence and limitations
 

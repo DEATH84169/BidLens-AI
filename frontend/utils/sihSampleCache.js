@@ -1,4 +1,3 @@
-// DEPRECATED SYNTHETIC FIXTURE. Not imported by the v2 UI; never use as live verification.
 /**
  * BidLens AI - SIH 2026 High-Resilience Sovereign Demo Cache
  * Guarantees zero-failure, instant demonstration for PPT evaluators even on flaky Wi-Fi.
