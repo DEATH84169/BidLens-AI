@@ -121,7 +121,7 @@ def calculate_claim_integrity_score(extracted_data: dict, contradictions: list) 
     
     if score >= 85:
         tier = "HIGH INTEGRITY"
-        desc = "High evidentiary substantiation. Statutory identifiers verified against public databases with consistent documentation."
+        desc = "No contradictions detected by the current document rules. This heuristic score does not verify registry status, authenticity or eligibility."
     elif score >= 60:
         tier = "MODERATE INTEGRITY"
         desc = "Minor discrepancies or missing statutory annexures detected. Supervisory review recommended before tender award."

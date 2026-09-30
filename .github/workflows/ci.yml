@@ -1,6 +1,7 @@
 name: BidLens AI CI
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main, supreme-leader ]
   pull_request:
